@@ -138,7 +138,8 @@
   }
 
   #note.resting {
-    color: var(--ivory-dim);
+    /* a plain dash, styled exactly like a note name - no fill, box or tint */
+    color: var(--ivory);
   }
 
   #note.locked {
@@ -297,7 +298,7 @@
 
   <div id="tuner">
     <div class="note-zone">
-      <div id="note" class="resting">&ndash;</div>
+      <div id="note" class="resting">-</div>
       <div id="freq"></div>
     </div>
 
@@ -524,7 +525,7 @@
     freqHistory.length = 0;
     isLocked = false;
     noteEl.className = 'resting';
-    noteEl.innerHTML = '&ndash;';
+    noteEl.textContent = '-';
     freqEl.textContent = '';
     centsEl.textContent = '';
     centsEl.className = '';
