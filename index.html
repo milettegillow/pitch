@@ -330,7 +330,8 @@
   var MPM_K = 0.9;               // first key max above K * highest key max wins
   var OCTAVE_GUARD_CENTS = 40;   // fold to running median if within this of an octave
   var SMOOTH_MS = 400;           // vibrato smoothing window
-  var LOCK_CENTS = 5;
+  var LOCK_ON_CENTS = 8;         // lock the gold glow on within this
+  var LOCK_OFF_CENTS = 12;       // ...and keep it until drift exceeds this (hysteresis)
 
   // ---------- elements ----------
   var startEl = document.getElementById('start');
@@ -516,8 +517,11 @@
   }
 
   // ---------- display ----------
+  var isLocked = false;   // gold-glow state, held with hysteresis
+
   function showResting() {
     freqHistory.length = 0;
+    isLocked = false;
     noteEl.className = 'resting';
     noteEl.innerHTML = '&ndash;';
     freqEl.textContent = '';
@@ -553,8 +557,14 @@
     var angle = (clamped / 50) * 38; // degrees
     needleEl.style.transform = 'translate(-50%, -50%) rotate(' + angle + 'deg)';
 
-    var locked = Math.abs(cents) <= LOCK_CENTS;
-    if (locked) {
+    // hysteresis: lock on within LOCK_ON_CENTS, hold until drift past LOCK_OFF_CENTS
+    var absCents = Math.abs(cents);
+    if (isLocked) {
+      if (absCents > LOCK_OFF_CENTS) isLocked = false;
+    } else {
+      if (absCents <= LOCK_ON_CENTS) isLocked = true;
+    }
+    if (isLocked) {
       noteEl.className = 'locked';
       needleEl.className = 'needle locked';
       centsEl.className = 'locked';
