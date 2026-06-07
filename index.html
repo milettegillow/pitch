@@ -326,7 +326,9 @@
   var MIN_FREQ = 70;
   var MAX_FREQ = 1200;
   var RMS_GATE = 0.01;
-  var CLARITY_GATE = 0.9;        // normalized autocorrelation peak threshold
+  var CLARITY_GATE = 0.6;        // minimum NSDF peak value to accept a frame
+  var MPM_K = 0.9;               // first key max above K * highest key max wins
+  var OCTAVE_GUARD_CENTS = 40;   // fold to running median if within this of an octave
   var SMOOTH_MS = 400;           // vibrato smoothing window
   var LOCK_CENTS = 5;
 
@@ -370,55 +372,100 @@
     return Math.floor(Math.round(m) / 12) - 1;
   }
 
-  // ---------- pitch detection: normalized autocorrelation ----------
+  // ---------- pitch detection: McLeod Pitch Method ----------
+  // reusable NSDF buffer, grown lazily to the longest lag we need
+  var nsdf = null;
+
   function detectPitch(buf, rate) {
     var size = buf.length;
     var i, j;
 
-    // RMS gate
+    // RMS gate - silence / quiet background rests
     var rms = 0;
     for (i = 0; i < size; i++) rms += buf[i] * buf[i];
     rms = Math.sqrt(rms / size);
     if (rms < RMS_GATE) return null;
 
-    // search lag range corresponding to MIN_FREQ..MAX_FREQ
-    var minLag = Math.floor(rate / MAX_FREQ);
-    var maxLag = Math.ceil(rate / MIN_FREQ);
+    // we only need lags up to the period of the lowest detectable note
+    var maxLag = Math.ceil(rate / MIN_FREQ) + 2;
     if (maxLag >= size) maxLag = size - 1;
+    if (!nsdf || nsdf.length < maxLag + 1) nsdf = new Float32Array(maxLag + 1);
 
-    var bestLag = -1;
-    var bestCorr = 0;
-
-    // normalized autocorrelation
-    for (var lag = minLag; lag <= maxLag; lag++) {
-      var corr = 0;
-      var norm0 = 0;
-      var norm1 = 0;
-      for (i = 0, j = lag; j < size; i++, j++) {
-        corr += buf[i] * buf[j];
-        norm0 += buf[i] * buf[i];
-        norm1 += buf[j] * buf[j];
+    // normalized square difference function (MPM):
+    //   n'(tau) = 2 * sum(x[j]*x[j+tau]) / sum(x[j]^2 + x[j+tau]^2)
+    for (var tau = 0; tau <= maxLag; tau++) {
+      var acf = 0;     // type-II autocorrelation r'(tau)
+      var div = 0;     // moving normalizer m'(tau)
+      for (i = 0, j = tau; j < size; i++, j++) {
+        acf += buf[i] * buf[j];
+        div += buf[i] * buf[i] + buf[j] * buf[j];
       }
-      var denom = Math.sqrt(norm0 * norm1);
-      var nc = denom > 0 ? corr / denom : 0;
-      if (nc > bestCorr) {
-        bestCorr = nc;
-        bestLag = lag;
-      }
+      nsdf[tau] = div > 0 ? (2 * acf) / div : 0;
     }
 
-    if (bestLag < 0 || bestCorr < CLARITY_GATE) return null;
+    // find key maxima: the local maxima between positive-going zero crossings
+    var maxima = [];   // flat pairs of [lag, value]
+    var pos = 1;
+    // skip the initial lobe at tau=0 until the NSDF first dips below zero
+    while (pos < maxLag && nsdf[pos] > 0) pos++;
+    // then advance to the first positive-going zero crossing
+    while (pos < maxLag && nsdf[pos] <= 0) pos++;
 
-    // parabolic interpolation around the peak for sub-sample accuracy
-    var refinedLag = bestLag;
-    if (bestLag > minLag && bestLag < maxLag) {
-      var c0 = ncAt(buf, bestLag - 1, size);
-      var c1 = bestCorr;
-      var c2 = ncAt(buf, bestLag + 1, size);
-      var denom2 = (c0 - 2 * c1 + c2);
-      if (denom2 !== 0) {
-        var shift = 0.5 * (c0 - c2) / denom2;
-        if (shift > -1 && shift < 1) refinedLag = bestLag + shift;
+    var curMaxLag = -1;
+    var curMaxVal = -Infinity;
+    while (pos < maxLag) {
+      if (nsdf[pos] > nsdf[pos - 1] && nsdf[pos] >= nsdf[pos + 1]) {
+        if (nsdf[pos] > curMaxVal) {
+          curMaxVal = nsdf[pos];
+          curMaxLag = pos;
+        }
+      }
+      pos++;
+      // a downward zero crossing closes the current key-maximum region
+      if (pos < maxLag && nsdf[pos] <= 0) {
+        if (curMaxLag >= 0) {
+          maxima.push(curMaxLag, curMaxVal);
+          curMaxLag = -1;
+          curMaxVal = -Infinity;
+        }
+        while (pos < maxLag && nsdf[pos] <= 0) pos++;
+      }
+    }
+    if (curMaxLag >= 0) maxima.push(curMaxLag, curMaxVal);
+    if (!maxima.length) return null;
+
+    // the cure for octave errors: take the FIRST key maximum that clears
+    // MPM_K times the highest key maximum, not the global maximum
+    var highest = 0;
+    for (i = 1; i < maxima.length; i += 2) {
+      if (maxima[i] > highest) highest = maxima[i];
+    }
+    var threshold = MPM_K * highest;
+
+    var chosenLag = -1;
+    var chosenVal = 0;
+    for (i = 0; i < maxima.length; i += 2) {
+      if (maxima[i + 1] >= threshold) {
+        chosenLag = maxima[i];
+        chosenVal = maxima[i + 1];
+        break;
+      }
+    }
+    if (chosenLag < 1) return null;
+
+    // clarity gate - reject noisy / pitchless frames
+    if (chosenVal < CLARITY_GATE) return null;
+
+    // parabolic interpolation around the chosen NSDF peak
+    var refinedLag = chosenLag;
+    if (chosenLag > 1 && chosenLag < maxLag) {
+      var a = nsdf[chosenLag - 1];
+      var b = nsdf[chosenLag];
+      var c = nsdf[chosenLag + 1];
+      var denom = a - 2 * b + c;
+      if (denom !== 0) {
+        var shift = 0.5 * (a - c) / denom;
+        if (shift > -1 && shift < 1) refinedLag = chosenLag + shift;
       }
     }
 
@@ -427,31 +474,45 @@
     return freq;
   }
 
-  function ncAt(buf, lag, size) {
-    var corr = 0, norm0 = 0, norm1 = 0;
-    for (var i = 0, j = lag; j < size; i++, j++) {
-      corr += buf[i] * buf[j];
-      norm0 += buf[i] * buf[i];
-      norm1 += buf[j] * buf[j];
-    }
-    var denom = Math.sqrt(norm0 * norm1);
-    return denom > 0 ? corr / denom : 0;
-  }
+  // ---------- vibrato smoothing (median in log / cents space) ----------
+  // history entries store { t, c } where c = 1200 * log2(f), a fixed-reference
+  // cents value, so the median stays musically even under vibrato.
+  function freqToCents(f) { return 1200 * Math.log2(f); }
+  function centsToFreq(c) { return Math.pow(2, c / 1200); }
 
-  // ---------- vibrato smoothing (median over window) ----------
-  function pushFreq(f, now) {
-    freqHistory.push({ t: now, f: f });
+  function prune(now) {
     var cutoff = now - SMOOTH_MS;
     while (freqHistory.length && freqHistory[0].t < cutoff) {
       freqHistory.shift();
     }
   }
 
-  function smoothedFreq() {
+  function medianCents() {
     if (!freqHistory.length) return null;
-    var arr = freqHistory.map(function (e) { return e.f; }).sort(function (a, b) { return a - b; });
+    var arr = freqHistory.map(function (e) { return e.c; }).sort(function (a, b) { return a - b; });
     var mid = Math.floor(arr.length / 2);
     return arr.length % 2 ? arr[mid] : (arr[mid - 1] + arr[mid]) / 2;
+  }
+
+  function pushFreq(f, now) {
+    // octave-jump guard: if the new reading is within OCTAVE_GUARD_CENTS of an
+    // exact octave of the running median, treat it as an octave slip and fold
+    // it to the octave nearest the median before it enters the buffer.
+    var medCents = medianCents();
+    if (medCents !== null) {
+      var diff = freqToCents(f) - medCents;           // cents above the median
+      var oct = Math.round(diff / 1200);              // nearest whole octave
+      if (oct !== 0 && Math.abs(diff - oct * 1200) < OCTAVE_GUARD_CENTS) {
+        f = f / Math.pow(2, oct);
+      }
+    }
+    freqHistory.push({ t: now, c: freqToCents(f) });
+    prune(now);
+  }
+
+  function smoothedFreq() {
+    var mc = medianCents();
+    return mc === null ? null : centsToFreq(mc);
   }
 
   // ---------- display ----------
@@ -520,11 +581,8 @@
     if (freq) {
       pushFreq(freq, now);
     } else {
-      // let history decay; if window empties, rest
-      var cutoff = now - SMOOTH_MS;
-      while (freqHistory.length && freqHistory[0].t < cutoff) {
-        freqHistory.shift();
-      }
+      // let history decay; if the window empties, fall back to resting
+      prune(now);
     }
 
     var sf = smoothedFreq();
