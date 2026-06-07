@@ -327,7 +327,7 @@
   var MAX_FREQ = 1200;
   var RMS_GATE = 0.01;
   var CLARITY_GATE = 0.6;        // minimum NSDF peak value to accept a frame
-  var MPM_K = 0.9;               // first key max above K * highest key max wins
+  var MPM_K = 0.93;              // first key max above K * highest key max wins
   var OCTAVE_GUARD_CENTS = 40;   // fold to running median if within this of an octave
   var SMOOTH_MS = 400;           // vibrato smoothing window
   var LOCK_ON_CENTS = 8;         // lock the gold glow on within this
@@ -348,7 +348,6 @@
   var analyser = null;
   var micStream = null;
   var timeBuf = null;
-  var sampleRate = 44100;
   var rafId = null;
 
   // active reference oscillators keyed by midi number
@@ -586,7 +585,8 @@
 
     analyser.getFloatTimeDomainData(timeBuf);
     var now = performance.now();
-    var freq = detectPitch(timeBuf, sampleRate);
+    // always use the live context sample rate - never a hardcoded value
+    var freq = detectPitch(timeBuf, audioCtx.sampleRate);
 
     if (freq) {
       pushFreq(freq, now);
@@ -707,7 +707,6 @@
       return;
     }
     audioCtx = new AudioCtx();
-    sampleRate = audioCtx.sampleRate;
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       showError('microphone is not available here');
@@ -725,10 +724,28 @@
       if (audioCtx.state === 'suspended') audioCtx.resume();
 
       var source = audioCtx.createMediaStreamSource(stream);
+
+      // two cascaded high-pass biquads (~24 db/oct at 75 hz) strip dc and
+      // sub-bass rumble from the stream before detection. low-frequency
+      // contamination skews autocorrelation toward shorter lags, which reads
+      // consistently sharp; filtering the continuous stream removes that bias
+      // without touching the vocal band (verified transparent to clean tones).
+      var hp1 = audioCtx.createBiquadFilter();
+      hp1.type = 'highpass';
+      hp1.frequency.value = 75;
+      hp1.Q.value = 0.707;
+      var hp2 = audioCtx.createBiquadFilter();
+      hp2.type = 'highpass';
+      hp2.frequency.value = 75;
+      hp2.Q.value = 0.707;
+
       analyser = audioCtx.createAnalyser();
       analyser.fftSize = 2048;
       timeBuf = new Float32Array(analyser.fftSize);
-      source.connect(analyser);
+
+      source.connect(hp1);
+      hp1.connect(hp2);
+      hp2.connect(analyser);
 
       buildPipe();
 
