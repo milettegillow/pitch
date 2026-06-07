@@ -321,7 +321,9 @@
   'use strict';
 
   // ---------- constants ----------
-  var NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+  // display labels only - detection maths is unaffected by the spelling.
+  // three accidentals are spelled as flats; C# and F# stay sharp.
+  var NOTE_NAMES = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
   var A4 = 440;
   var MIN_FREQ = 70;
   var MAX_FREQ = 1200;
@@ -538,11 +540,11 @@
 
     var name = midiToName(nearest);
     var octave = midiToOctave(nearest);
-    var sharp = name.length > 1;
+    var accidental = name.length > 1 ? name.charAt(1) : '';
     var letter = name.charAt(0);
 
     noteEl.innerHTML = letter +
-      (sharp ? '<span class="sharp" style="font-size:0.5em;vertical-align:super;">#</span>' : '') +
+      (accidental ? '<span class="sharp" style="font-size:0.5em;vertical-align:super;">' + accidental + '</span>' : '') +
       '<span class="octave">' + octave + '</span>';
 
     freqEl.textContent = freq.toFixed(1) + ' hz';
@@ -655,11 +657,11 @@
     // C4 (midi 60) to B4 (midi 71)
     for (var m = 60; m <= 71; m++) {
       var name = midiToName(m);
-      var sharp = name.length > 1;
+      var accidental = name.length > 1 ? name.charAt(1) : '';
       var btn = document.createElement('button');
       btn.className = 'key';
       btn.type = 'button';
-      btn.innerHTML = name.charAt(0) + (sharp ? '<span class="sharp">#</span>' : '');
+      btn.innerHTML = name.charAt(0) + (accidental ? '<span class="sharp">' + accidental + '</span>' : '');
       bindKey(btn, m);
       pipeEl.appendChild(btn);
     }
